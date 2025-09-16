@@ -1,106 +1,96 @@
 import os
-import re
 import pandas as pd
 import numpy as np
+from tqdm import tqdm
 
-# 中文數字轉阿拉伯數字對照表
-chinese_num_map = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6}
+# ========== 參數設定 ==========
+DATA_ROOT = "train/一根"  # 根目錄
+SENSOR_LIST = [f"sensor{i}" for i in range(1, 7)]
+LABEL_MAP = {"正常": 0, "7圈": 1, "10圈": 2}
+PRESSURE_COLS = [f"psr_val_{i}" for i in range(6)]
+TIME_COL = "si_ts"
+PRESSURE_THRESHOLD = 0.2  # 保壓判斷門檻
+OUTPUT_DIR = "features_output"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+# =============================
 
-# 洩漏圈數對應百分比
-leak_percent_map = {
-    '1圈': 2.78,
-    '10圈': 27.78,
-    '20圈': 55.56,
-    '全開': 100.0
-}
+# ===== holding_time（不等間隔，線性插值） =====
+def _duration_above_threshold_irregular(ts: pd.Series, x: np.ndarray, thr: float) -> float:
+    t = pd.to_datetime(ts).astype("int64").to_numpy() / 1e9
+    if len(t) < 2: return 0.0
+    total = 0.0
+    for i in range(len(t) - 1):
+        t0, t1 = t[i], t[i + 1]
+        x0, x1 = x[i], x[i + 1]
+        dt = t1 - t0
+        if dt <= 0: continue
+        above0, above1 = (x0 > thr), (x1 > thr)
+        if above0 and above1:
+            total += dt
+        elif above0 != above1:
+            tau = (thr - x0) * dt / (x1 - x0) if x1 != x0 else dt / 2.0
+            tau = max(0.0, min(dt, tau))
+            total += (dt - tau) if (not above0 and above1) else tau
+    return float(total)
 
-# 資料夾路徑
-root_folder = "data"
+# ===== 特徵 =====
+def extract_features(df: pd.DataFrame, col: str):
+    if df is None or df.empty or col not in df or TIME_COL not in df:
+        return None
+    x = df[col].astype(float).to_numpy()
+    ts = pd.to_datetime(df[TIME_COL])
+    if len(x) < 2 or ts.isna().any(): return None
+    if not ts.is_monotonic_increasing:
+        df = df.sort_values(TIME_COL).reset_index(drop=True)
+        x = df[col].astype(float).to_numpy()
+        ts = pd.to_datetime(df[TIME_COL])
 
-# 切片參數
-window_sec = 11
-overlap = 0.5
-sampling_rate = 45  # 假設為固定 45Hz
-window_size = int(window_sec * sampling_rate)
-step_size = int(window_size * (1 - overlap))
+    x_max, x_min = float(np.max(x)), float(np.min(x))
+    x_mean, x_std = float(np.mean(x)), float(np.std(x))
+    x_range = float(x_max - x_min)
+    total_sec = max((ts.iloc[-1] - ts.iloc[0]).total_seconds(), 1e-9)
+    
+    print(total_sec)
+    
+    holding_time = _duration_above_threshold_irregular(ts, x, thr=PRESSURE_THRESHOLD)
+    return {"mean": x_mean, "std": x_std, "range": x_range, "holding_time": holding_time}
 
-sensors = ['pressure1', 'pressure2', 'pressure3', 'pressure4', 'pressure5', 'pressure6']
+def process_sensor(sensor: str):
+    records = []
+    for label_folder in LABEL_MAP.keys():
+        class_dir = os.path.join(DATA_ROOT, label_folder, sensor)
+        print(class_dir)
+        if not os.path.exists(class_dir):
+            continue
 
-# 結果列表
-all_records = []
-X_data = []
-y_data = []
+        for file in tqdm(os.listdir(class_dir), desc=f"[{sensor}] {label_folder}"):
+            if not file.endswith(".csv"):
+                continue
+            path = os.path.join(class_dir, file)
+            df = pd.read_csv(path, encoding="utf-8-sig")
+            sensor_idx = int(sensor[-1]) - 1  # sensor1 → psr_val_0
 
-def extract_sensor_indices(filename: str):
-    filename = filename.replace('.xlsx', '')
-    matches = re.findall(r'[一二三四五六]', filename)
-    indices = [chinese_num_map[char] for char in matches]
-    return indices
+            pressure_col = f"psr_val_{sensor_idx}"
+            if pressure_col not in df.columns or TIME_COL not in df.columns:
+                continue
 
-# 遍歷所有檔案
-for root, dirs, files in os.walk(root_folder):
-    for file in files:
-        if file.endswith(".xlsx"):
-            file_path = os.path.join(root, file)
-            print("🔍 處理中:", file_path)
+            features = extract_features(df, pressure_col)
+            if features is None:
+                continue
+            features["label"] = LABEL_MAP[label_folder]
+            features["file"] = file
+            records.append(features)
 
-            try:
-                df = pd.read_excel(file_path)
-                df['timestamp'] = pd.to_datetime(df['timestamp'])
-                df = df.sort_values('timestamp').reset_index(drop=True)
-                
-                
-                median_interval = df['timestamp'].diff().dt.total_seconds().median()
-                actual_sampling_rate = 1 / median_interval
-                print(f"⚙️ 檔案: {file} 實際頻率：{actual_sampling_rate:.2f} Hz")
+    return pd.DataFrame(records)
 
 
-                # === 處理 label ===
-                if file == "正常.xlsx" or "正常" in file_path:
-                    label = [0.0] * 6  # 全正常無洩漏
-                else:
-                    leak_dir = os.path.basename(os.path.dirname(file_path))
-                    leak_percent = leak_percent_map.get(leak_dir, 0.0)
-                    leak_indices = extract_sensor_indices(file)
-                    label = [0.0] * 6
-                    for idx in leak_indices:
-                        label[idx - 1] = leak_percent
+def main():
+    for sensor in SENSOR_LIST:
+        df = process_sensor(sensor)
+        out_path = os.path.join(OUTPUT_DIR, f"{sensor}_train.csv")
+        df.to_csv(out_path, index=False, encoding="utf-8-sig")
+        print(f"[✓] 輸出：{out_path} ({len(df)} 筆樣本)")
 
-                # === 切時間視窗 ===
-                for start in range(0, len(df) - window_size + 1, step_size):
-                    window = df.iloc[start:start + window_size]
-                    sequence = []
-                    for sensor in sensors:
-                        values = window[sensor].replace(-1, np.nan).values
-                        sequence.append(values)
 
-                    sequence = np.array(sequence).T  # shape: [timesteps, 6]
-
-                    # === 插值補 NaN → 整數（僅限時間序列部分）===
-                    for i in range(sequence.shape[1]):
-                        col_series = pd.Series(sequence[:, i])
-                        interpolated = col_series.interpolate().bfill().ffill().round()
-                        sequence[:, i] = interpolated.values
-                    
-                    sequence_flat = sequence.flatten()
-                    all_records.append(np.concatenate([sequence_flat, label]))
-
-                    X_data.append(sequence.astype(int))
-                    y_data.append(label)  # 保留浮點數 label
-
-            except Exception as e:
-                print(f"❌ 錯誤讀取 {file_path}: {e}")
-
-# # 儲存為 CSV
-output_columns = [f't{i}_sensor{j+1}' for i in range(window_size) for j in range(6)] + \
-                 [f'label_sensor{i+1}' for i in range(6)]
-
-# output_df = pd.DataFrame(all_records, columns=output_columns)
-# output_df.to_csv("all_leakage_LSTM_dataset.csv", index=False)
-# print("✅ 所有資料已完成處理，儲存為 all_leakage_LSTM_dataset.csv")
-
-X_data = np.array(X_data)  # shape: [samples, timesteps, 6]
-y_data = np.array(y_data)  # shape: [samples, 6]
-
-output_npz_path = "train_dataset.npz"
-np.savez_compressed(output_npz_path, X=X_data, y=y_data)
+if __name__ == "__main__":
+    main()
