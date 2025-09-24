@@ -50,20 +50,18 @@ def extract_features(df: pd.DataFrame, col: str):
     x_range = float(x_max - x_min)
     total_sec = max((ts.iloc[-1] - ts.iloc[0]).total_seconds(), 1e-9)
     
-    print(total_sec)
-    
     holding_time = _duration_above_threshold_irregular(ts, x, thr=PRESSURE_THRESHOLD)
     return {"mean": x_mean, "std": x_std, "range": x_range, "holding_time": holding_time}
 
-def process_sensor(sensor: str):
+def process_sensor(sensor: str, data_root: str):
     records = []
     for label_folder in LABEL_MAP.keys():
-        class_dir = os.path.join(DATA_ROOT, label_folder, sensor)
-        print(class_dir)
+        class_dir = os.path.join(data_root, label_folder, sensor)
+        print(f"[DEBUG] 處理資料夾: {class_dir}")
         if not os.path.exists(class_dir):
             continue
 
-        for file in tqdm(os.listdir(class_dir), desc=f"[{sensor}] {label_folder}"):
+        for file in tqdm(os.listdir(class_dir), desc=f"[{os.path.basename(data_root)}] {sensor} {label_folder}"):
             if not file.endswith(".csv"):
                 continue
             path = os.path.join(class_dir, file)
@@ -79,17 +77,28 @@ def process_sensor(sensor: str):
                 continue
             features["label"] = LABEL_MAP[label_folder]
             features["file"] = file
+            # features["source"] = os.path.basename(data_root)  # 記錄來自一根/兩根
             records.append(features)
 
     return pd.DataFrame(records)
 
 
 def main():
+    data_roots = [os.path.join("train", d) for d in os.listdir("train") if os.path.isdir(os.path.join("train", d))]
+    print(f"發現資料來源：{data_roots}")
+
     for sensor in SENSOR_LIST:
-        df = process_sensor(sensor)
-        out_path = os.path.join(OUTPUT_DIR, f"{sensor}_train.csv")
-        df.to_csv(out_path, index=False, encoding="utf-8-sig")
-        print(f"[✓] 輸出：{out_path} ({len(df)} 筆樣本)")
+        all_records = []
+        for root in data_roots:
+            df = process_sensor(sensor, root)
+            if not df.empty:
+                all_records.append(df)
+
+        if all_records:
+            merged = pd.concat(all_records, ignore_index=True)
+            out_path = os.path.join(OUTPUT_DIR, f"{sensor}_train.csv")
+            merged.to_csv(out_path, index=False, encoding="utf-8-sig")
+            print(f"[✓] 輸出：{out_path} ({len(merged)} 筆樣本)")
 
 
 if __name__ == "__main__":

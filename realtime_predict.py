@@ -133,10 +133,6 @@ def ensure_features_index_header(path: str):
             "p_0", "p_7", "p_10", "leak_score",
             "file"
         ]).to_csv(path, index=False, encoding="utf-8-sig")
-        
-def on_timeout(sensor_key, duration_sec, start_ts, now_ts):
-    # 你也可以在這裡：寫入告警表、發通知、丟API等
-    print(f"⚠️ 即時告警：{sensor_key} 週期已 {duration_sec:.2f}s（{start_ts} → {now_ts}）")
 
 # ===== 主流程 =====
 def main():
