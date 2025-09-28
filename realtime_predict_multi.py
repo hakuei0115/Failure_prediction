@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import joblib
 from dotenv import load_dotenv
-from modules import MySQLConnector,CycleDetector, ProbVoteBuffer, MultiLeakArbiter, send_sms, lifespan_estimation, error_log, mysql_log, mqtt_log
+from modules import MySQLConnector,CycleDetector, ProbVoteBuffer, MultiLeakArbiter, send_sms, error_log, mysql_log, mqtt_log
 from config.constants import *
 
 load_dotenv()
@@ -230,8 +230,6 @@ def main():
 
             results = []
             for i, pred_label in enumerate(y_pred, start=1):
-                do_count = pending_cycles[f"psr_val_{i-1}"]["do_count"]
-                Y, cond_prob = lifespan_estimation(do_count)
 
                 result = {
                     "cycle_id": cycle_counters,
@@ -240,7 +238,6 @@ def main():
                     "predicted_class": int(pred_label),
                     "predicted_name": label_name(pred_label),
                     "maintenance_policy": POLICY_MAP.get(pred_label, "未知"),
-                    "lifespan_estimation": f"閥門 {i}：已運作 {do_count:,} 次後，還能再 {Y:,} 次的機率：約 {cond_prob:.2%}"
                 }
                 results.append(result)
                 

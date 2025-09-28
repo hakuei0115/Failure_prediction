@@ -212,7 +212,7 @@ def main():
             winners, details = arbiter.update(sensor_name, end_ts, pred_label, prob_map)
             
             if winners:
-                # send_sms(USERNAME, PASSWORD, API, MOBILE, f"{sensor_name} 洩漏！詳情：{details}")
+                # send_sms(USERNAME, PASSWORD, API, MOBILE, f"{sensor_name} 洩漏（等級：{pred_name}）！")
                 print(f"仲裁後目前洩漏: {winners} ｜細節: {details}")
             
             result = {

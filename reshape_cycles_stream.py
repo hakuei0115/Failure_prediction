@@ -44,7 +44,7 @@ detector = CycleDetector(
         high_th=HIGH_ON,
         sensor_key=f"psr_val_{i-1}",
         mode=MODE_MAP[f"psr_val_{i-1}"],
-        fixed_duration_sec=11.0
+        fixed_duration_sec=10.0
     )
 
 cycle_id = 1

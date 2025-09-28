@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import joblib
 from dotenv import load_dotenv
-from modules import MySQLConnector, CycleDetector, MultiLeakArbiter, send_sms, lifespan_estimation, error_log, mysql_log, mqtt_log
+from modules import MySQLConnector, CycleDetector, MultiLeakArbiter, send_sms, error_log, mysql_log, mqtt_log
 from config.constants import *
 
 load_dotenv()
@@ -159,14 +159,8 @@ def main():
     while True:
         record = sql.get_latest_row(TABLE_NAME)
         record['si_ts'] = _to_datetime(record['si_ts'])
-        
-        do_counter_records = sql.get_latest_row(LIFE_LIMIT_TABLE)
-        
+
         for key, det in detectors.items():
-            do_count = do_counter_records[f'do_count_{int(key.split("_")[2]) + 1}']
-
-            Y, cond_prob = lifespan_estimation(do_count)
-
             cycle_df = det.update(record)
             if cycle_df is None or cycle_df.empty:
                 continue
@@ -203,7 +197,7 @@ def main():
             winners, details = arbiter.update(sensor_name, end_ts, pred_label, prob_map)
             
             if winners:
-                send_sms(USERNAME, PASSWORD, API, MOBILE, f"{sensor_name} 洩漏！詳情：{details}")
+                send_sms(USERNAME, PASSWORD, API, MOBILE, f"{sensor_name} 洩漏（等級：{pred_name}）！")
                 # print(f"仲裁後目前洩漏: {winners} ｜細節: {details}")
             
             result = {
@@ -211,7 +205,6 @@ def main():
                 "machine_id": record['si_ip'],
                 "predicted_class": pred_name,
                 "maintenance_policy": POLICY_MAP.get(pred_label, "未知"),
-                "lifespan_estimation": f"閥門 {int(key.split('_')[2]) + 1}：已運作 {do_count:,} 次後，還能再 {Y:,} 次的機率：約 {cond_prob:.2%}",
             }
 
             row = {
