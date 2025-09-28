@@ -40,7 +40,10 @@ class MySQLConnector:
     def get_latest_row(self, table):
         connection = self.connect()
         cursor = connection.cursor(dictionary=True)
-        query = f"SELECT * FROM {table} ORDER BY si_id DESC LIMIT 1"
+        if table == 'si_status':
+            query = f"SELECT * FROM {table} ORDER BY si_ts DESC LIMIT 1"
+        else:
+            query = f"SELECT * FROM {table} ORDER BY si_id DESC LIMIT 1"
         try:
             cursor.execute(query)
             result = cursor.fetchone()
