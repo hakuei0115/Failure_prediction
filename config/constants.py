@@ -8,11 +8,13 @@ ID_COL = "si_id"
 TIME_COL = "si_ts"
 
 # ===== 特徵欄位參數 =====
-FEATURE_COLS = ["mean", "std", "holding_time", "range"]
+FEATURE_COLS = ["mean", "std", "holding_time"]
 
 # ===== 模型參數 =====
 # LABEL_MAP = {0: "✅ 正常", 1: "⚠️ 洩漏（7圈）", 2: "🚨 洩漏（10圈）"}
-LABEL_MAP = {0: "洩漏等級0", 1: "洩漏等級1", 2: "洩漏等級2"}
+LABEL_MAP = {0: "✅ 正常", 1: "⚠️ 洩漏（5圈）", 2: "⚠️ 洩漏（7圈）", 3: "🚨 洩漏（10圈）"}
+# LABEL_MAP = {0: "洩漏等級0", 1: "洩漏等級1", 2: "洩漏等級2"}
+# LABEL_MAP = {0: "洩漏等級0", 1: "洩漏等級1", 2: "洩漏等級2", 3: "洩漏等級3"}
 
 POLICY_MAP = {
     0: "無需維修",

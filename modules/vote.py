@@ -1,92 +1,106 @@
-import numpy as np
 import pandas as pd
-from collections import deque, defaultdict
-
-class ProbVoteBuffer:
-    """單一感測器：保留最近 window_sec 內的機率分佈並做加總。"""
-    def __init__(self, window_sec=30.0, maxlen=None):
-        self.window_sec = float(window_sec)
-        self.maxlen = maxlen
-        self.q = deque()  # (ts: Timestamp, prob_map: {0/5/10 -> prob})
-
-    def add(self, ts, prob_map, fallback_label = None):
-        if not prob_map:
-            prob_map = {}
-            if fallback_label is not None:
-                prob_map[int(fallback_label)] = 1.0  # one-hot 後備
-        clean = {}
-        for k in [0, 1, 2]:
-            v = float(prob_map.get(k, 0.0))
-            if np.isfinite(v) and v >= 0.0:
-                clean[k] = v
-        self.q.append((ts, clean))
-        if self.maxlen is not None:
-            while len(self.q) > self.maxlen:
-                self.q.popleft()
-        self._trim(ts)
-
-    def _trim(self, now: pd.Timestamp):
-        cutoff = now - pd.Timedelta(seconds=self.window_sec)
-        while self.q and self.q[0][0] < cutoff:
-            self.q.popleft()
-
-    def counts(self) -> dict:
-        c = defaultdict(float)
-        for _, pm in self.q:
-            for k, p in pm.items():
-                c[k] += p
-        return dict(c)
-
-    def leak_score(self) -> float:
-        c = self.counts()
-        return float(c.get(1, 0.0) + c.get(2, 0.0))
-
-    def samples(self) -> int:
-        return len(self.q)
+from collections import defaultdict, Counter
+import threading
+import time
 
 class MultiLeakArbiter:
-    def __init__(self, sensors, batch_sec=300, min_votes=2, leak_threshold=1.2, drop_threshold=0.8, max_winners=2):
-        self.buffers = {s: [] for s in sensors}   # 改成 list 累積
+    """
+    多感測器洩漏仲裁器（長週期統計版，無輸出）
+    -------------------------------------------------
+    功能：
+      - 在 batch_sec 內累積各感測器洩漏紀錄（pred_label != 0）
+      - 每次結算只回傳：
+          {
+            "top1": {"sensor": <感測器>, "class": <洩漏類別>},
+            "top2": {"sensor": <感測器>, "class": <洩漏類別>}  # 可選
+          }
+      - 不印出、不告警、不紀錄
+    """
+
+    def __init__(self, sensors, batch_sec=300, on_batch_result=None):
+        self.sensors = sensors
         self.batch_sec = batch_sec
-        self.min_votes = int(min_votes)
-        self.leak_threshold = float(leak_threshold)
-        self.drop_threshold = float(drop_threshold)
-        self.max_winners = int(max_winners)
-        self.batch_start_ts = None  # 批次起始時間
+        self.buffers = {s: [] for s in sensors}
+        self.lock = threading.Lock()
+        self._running = False
+        self._last_results = {}
+        self.on_batch_result = on_batch_result  # 可選 callback
 
-    def update(self, sensor_name: str, ts, pred_label, prob_map):
-        if self.batch_start_ts is None:
-            self.batch_start_ts = ts
+    # ===== 啟動與停止 =====
+    def start(self):
+        """啟動背景結算執行緒"""
+        self._running = True
+        threading.Thread(target=self._batch_loop, daemon=True).start()
 
-        # 收集一筆
-        self.buffers[sensor_name].append((ts, prob_map or {pred_label: 1.0}))
+    def stop(self):
+        """停止背景結算"""
+        self._running = False
 
-        # 判斷是否到達批次結算時間
-        if (ts - self.batch_start_ts).total_seconds() < self.batch_sec:
-            return [], {}  # 還沒到時間，不輸出
+    # ===== 新增資料 =====
+    def update(self, sensor_name, ts, pred_label=None, prob_map=None):
+        """
+        加入一筆預測結果。
+        - 只統計 pred_label = 1 或 2（洩漏類別）
+        """
+        with self.lock:
+            label = pred_label
+            # 若有 prob_map，取最大機率類別
+            if prob_map and isinstance(prob_map, dict):
+                label = max(prob_map, key=prob_map.get)
+            if label in [1, 2]:
+                self.buffers[sensor_name].append(label)
 
-        # ===== 投票邏輯 =====
-        scores, samples = {}, {}
-        for s, data in self.buffers.items():
-            counts = defaultdict(float)
-            for _, pm in data:
-                for k, p in pm.items():
-                    counts[k] += p
-            scores[s] = counts.get(1, 0.0) + counts.get(2, 0.0)
-            samples[s] = len(data)
+    # ===== 週期性結算 =====
+    def _batch_loop(self):
+        while self._running:
+            time.sleep(self.batch_sec)
+            results = self._finalize_batch()
+            if self.on_batch_result:
+                self.on_batch_result(results)
 
-        candidates = [
-            s for s in self.buffers.keys()
-            if samples[s] >= self.min_votes and scores[s] >= self.leak_threshold
-        ]
-        
-        pool_sorted = sorted(candidates, key=lambda s: scores[s], reverse=True)
-        winners = set(pool_sorted[:self.max_winners])
+    # ===== 統計核心 =====
+    def _finalize_batch(self):
+        with self.lock:
+            leak_counts = defaultdict(int)   # 感測器洩漏次數
+            leak_modes = {}                  # 感測器主要洩漏類別
 
-        details = {"scores": scores, "samples": samples, "candidates": candidates, "winners": list(winners)}
+            for s, labels in self.buffers.items():
+                if not labels:
+                    continue
+                leak_counts[s] = len(labels)
+                leak_modes[s] = Counter(labels).most_common(1)[0][0]
 
-        # ===== 重設，開始下一個批次 =====
-        self.buffers = {s: [] for s in self.buffers.keys()}
-        self.batch_start_ts = ts
+            # 若無洩漏事件 → 清空並回傳 {}
+            if not leak_counts:
+                self._last_results = {}
+                self.buffers = {s: [] for s in self.sensors}
+                return {}
 
-        return list(winners), details
+            # 排序：洩漏次數高到低
+            sorted_sensors = sorted(leak_counts.items(), key=lambda x: x[1], reverse=True)
+            top1_sensor, top1_count = sorted_sensors[0]
+            top2_sensor, top2_count = (None, 0)
+            if len(sorted_sensors) > 1:
+                top2_sensor, top2_count = sorted_sensors[1]
+
+            # 準備回傳結果
+            results = {
+                "top1": {
+                    "sensor": top1_sensor,
+                    "class": leak_modes[top1_sensor]
+                }
+            }
+            if top2_sensor and top2_count >= top1_count / 2.0:
+                results["top2"] = {
+                    "sensor": top2_sensor,
+                    "class": leak_modes[top2_sensor]
+                }
+
+            self._last_results = results
+            self.buffers = {s: [] for s in self.sensors}
+            return results
+
+    # ===== 主動取結果 =====
+    def fetch_results(self):
+        """主程式可隨時取得最新一批結果"""
+        return self._last_results

@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import joblib
 from dotenv import load_dotenv
-from modules import CycleDetector, MultiLeakArbiter, send_sms, error_log, mysql_log, mqtt_log
+from modules import MySQLConnector, CycleDetector, MultiLeakArbiter, send_sms, error_log, mysql_log, mqtt_log
 from config.constants import *
 
 load_dotenv()
@@ -20,11 +20,12 @@ POLICY_DB = os.getenv("POLICY_DB")
 POLICY_TABLE = os.getenv("POLICY_TABLE")
 DATA_DB = os.getenv("DATA_DB")
 TABLE_NAME = os.getenv("TABLE_NAME")
+LIFE_LIMIT_TABLE = os.getenv("LIFE_LIMIT_TABLE")
 
-# ===== 參數 =====
 OUTPUT_DIR = "cycles_out"
+MODELS_DIR = "new_feature/models_no5"
+# MODELS_DIR = "new_feature/models_many_normal_no5"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-MODELS_DIR = "models_many_normal"
 CYCLE_ERROR = 0
 
 # ===== 時間 & 資料流 =====
@@ -44,21 +45,6 @@ def _to_datetime(val):
         else:          return pd.to_datetime(f, unit="s",  errors="coerce")
     except Exception:
         return None
-
-def simulate_data_stream():
-    df = pd.read_csv('row_data/兩根/5圈/第一二根五圈.csv', encoding="utf-8-sig")
-    for _, row in df.iterrows():
-        record = {
-            'si_ts': _to_datetime(row['si_ts']),
-            'psr_val_0': float(row['psr_val_0']),
-            'psr_val_1': float(row['psr_val_1']),
-            'psr_val_2': float(row['psr_val_2']),
-            'psr_val_3': float(row['psr_val_3']),
-            'psr_val_4': float(row['psr_val_4']),
-            'psr_val_5': float(row['psr_val_5']),
-        }
-        # time.sleep(0.02)
-        yield record
 
 # ===== holding_time（不等間隔，線性插值） =====
 def _duration_above_threshold_irregular(ts: pd.Series, x: np.ndarray, thr: float) -> float:
@@ -89,25 +75,50 @@ def extract_features(df: pd.DataFrame, col: str):
     if len(x) < 2 or ts.isna().any():
         return None
 
-    # 保證時間遞增
+    # 確保時間排序
     if not ts.is_monotonic_increasing:
         df = df.sort_values(TIME_COL).reset_index(drop=True)
         x = df[col].astype(float).to_numpy()
         ts = pd.to_datetime(df[TIME_COL])
 
-    # 計算保壓時間（全段）
-    holding_time = _duration_above_threshold_irregular(ts, x, thr=PRESSURE_THRESHOLD)
+    # 時間轉秒
+    t = ts.astype("int64").to_numpy() / 1e9
 
-    # ===== 只取保壓區間特徵 =====
+    # ===== 保壓判斷 =====
+    holding_time = _duration_above_threshold_irregular(ts, x, thr=PRESSURE_THRESHOLD)
     mask = x > PRESSURE_THRESHOLD
-    if np.sum(mask) == 0:  # 若完全沒有保壓段
+    if np.sum(mask) == 0:
         return None
 
     x_hold = x[mask]
-    x_mean = float(np.mean(x_hold))
-    x_std = float(np.std(x_hold))
+    t_hold = t[mask]
 
-    return { "mean": x_mean, "std": x_std, "holding_time": holding_time }
+    # ===== 基本特徵 =====
+    mean = float(np.mean(x_hold))
+    std = float(np.std(x_hold))
+
+    # ===== 洩漏差異關鍵特徵 =====
+    # 1. 壓力衰減率（負值表示下降）
+    if holding_time > 0:
+        decay_rate = float((x_hold[-1] - x_hold[0]) / holding_time)
+    else:
+        decay_rate = 0.0
+
+    # 2. 前半後半平均壓力差
+    mid = len(x_hold) // 2
+    diff_half = float(np.mean(x_hold[:mid]) - np.mean(x_hold[mid:]))
+
+    # 3. 壓力曲線面積（近似能量）
+    integral = float(np.trapezoid(x_hold, t_hold))
+
+    return {
+        "mean": mean,
+        "std": std,
+        "decay_rate": decay_rate,
+        "diff_half": diff_half,
+        "integral": integral,
+        "holding_time": holding_time
+    }
 
 # ===== 推論輔助 =====
 def _safe_vector_from_features(feats: dict, feature_cols: list[str], model=None):
@@ -155,10 +166,10 @@ def ensure_features_index_header(path: str):
             "start_ts", "end_ts", "n_points",
             *FEATURE_COLS,
             "pred_label", "pred_name",
-            "p_0", "p_5", "p_7", "p_10", "leak_score",
+            "p_0", "p_7", "p_10", "leak_score",
             "file"
         ]).to_csv(path, index=False, encoding="utf-8-sig")
-        
+
 def handle_batch_result(results):
     """每個結算週期結束後執行（由 arbiter 呼叫）"""
     if not results:
@@ -184,20 +195,13 @@ def handle_batch_result(results):
 # ===== 主流程 =====
 def main():
     global CYCLE_ERROR
-    # sql = MySQLConnector(MYSQL_HOST, MYSQL_USER, MYSQL_PASSWORD, DATA_DB)
-    # sql2 = MySQLConnector(MYSQL_HOST, MYSQL_USER, MYSQL_PASSWORD, POLICY_DB)
+    sql = MySQLConnector(MYSQL_HOST, MYSQL_USER, MYSQL_PASSWORD, DATA_DB)
+    sql2 = MySQLConnector(MYSQL_HOST, MYSQL_USER, MYSQL_PASSWORD, POLICY_DB)
     
     detectors = {
         key: CycleDetector(low_th=LOW_END, high_th=HIGH_ON, sensor_key=key, mode=MODE_MAP[key], fixed_duration_sec=11.0)
         for key in MODE_MAP.keys()
     }
-    
-    arbiter = MultiLeakArbiter(
-        sensors=list(SENSOR_NAME.values()),
-        batch_sec=5,  # 5 分鐘統計一次
-        on_batch_result=handle_batch_result
-    )
-    arbiter.start()
     
     cycle_counters = {key: 1 for key in MODE_MAP.keys()}
     models = load_models()
@@ -205,70 +209,100 @@ def main():
     features_index_path = os.path.join(OUTPUT_DIR, "features_index.csv")
     ensure_features_index_header(features_index_path)
 
-    for record in simulate_data_stream():
-        for key, det in detectors.items():
-            cycle_df = det.update(record)
-            if cycle_df is None or cycle_df.empty:
-                continue
+    arbiter = MultiLeakArbiter(
+        sensors=list(SENSOR_NAME.values()),
+        batch_sec=300,  # 5 分鐘統計一次
+        on_batch_result=handle_batch_result
+    )
+    arbiter.start()
 
-            sensor_name = SENSOR_NAME[key]
-            if det.last_cycle_valid is False:
-                CYCLE_ERROR += 1
-                if CYCLE_ERROR >= 3:
-                    # send_sms(USERNAME, PASSWORD, API, MOBILE, f"⚠️ {sensor_name} 連續三次異常，請檢查系統！")
-                    print(f"⚠️ {sensor_name} 異常窗，略過（{det.last_cycle_reason}）") # 加入counter
-                continue
-            
-            cid = cycle_counters[key]
-            cycle_file = os.path.join(OUTPUT_DIR, f"{sensor_name}_cycle_{cid:03d}.csv")
-            cycle_df.to_csv(cycle_file, index=False, encoding="utf-8-sig")
+    try:
+        while True:
+            record = sql.get_latest_row(TABLE_NAME)
+            record['si_ts'] = _to_datetime(record['si_ts'])
 
-            feats = extract_features(cycle_df, key) or {}
-            model = models.get(sensor_name)
-            X_row = _safe_vector_from_features(feats, FEATURE_COLS, model=model)
+            for key, det in detectors.items():
+                cycle_df = det.update(record)
+                if cycle_df is None or cycle_df.empty:
+                    continue
 
-            pred_label, pred_name, prob_map = None, None, {}
-            if model is not None and X_row is not None:
-                pred_label, pred_name, prob_map = predict_with_model(model, X_row)
-            
+                sensor_name = SENSOR_NAME[key]
+                
+                if det.last_cycle_valid is False:
+                    CYCLE_ERROR += 1
+                    if CYCLE_ERROR >= 3:
+                        send_sms(USERNAME, PASSWORD, API, MOBILE, f"⚠️ {sensor_name} 連續三次異常，請檢查系統！")
+                        # print(f"⚠️ {sensor_name} 異常窗，略過（{det.last_cycle_reason}）") # 加入counter
+                    continue
+                
+                cid = cycle_counters[key]
+                cycle_file = os.path.join(OUTPUT_DIR, f"{sensor_name}_cycle_{cid:03d}.csv")
+                cycle_df.to_csv(cycle_file, index=False, encoding="utf-8-sig")
 
-            p0 = prob_map.get(0, 0.0)
-            p7 = prob_map.get(1, 0.0)
-            p10 = prob_map.get(2, 0.0)
-            leak_score = p7 + p10
+                feats = extract_features(cycle_df, key) or {}
+                model = models.get(sensor_name)
+                X_row = _safe_vector_from_features(feats, FEATURE_COLS, model=model)
 
-            start_ts = pd.to_datetime(cycle_df[TIME_COL].iloc[0])
-            end_ts   = pd.to_datetime(cycle_df[TIME_COL].iloc[-1])
-            
-            arbiter.update(sensor_name, end_ts, pred_label, prob_map)
+                pred_label, pred_name, prob_map = None, None, {}
+                if model is not None and X_row is not None:
+                    pred_label, pred_name, prob_map = predict_with_model(model, X_row)
 
-            row = {
-                "cycle_id": cid,
-                "sensor_key": key,
-                "sensor_name": sensor_name,
-                "start_ts": start_ts,
-                "end_ts": end_ts,
-                "n_points": len(cycle_df),
-                **{c: feats.get(c, None) for c in FEATURE_COLS},
-                "pred_label": pred_label,
-                "pred_name": pred_name,
-                "p_0": p0, "p_7": p7, "p_10": p10,
-                "leak_score": leak_score,
-                "file": cycle_file,
-            }
-            
-            pd.DataFrame([row]).to_csv(
-                features_index_path, mode="a", header=False, index=False, encoding="utf-8-sig"
-            )
-            
-            print(
-                f"✅ {sensor_name} 週期 #{cid}｜{start_ts}→{end_ts}｜"
-                f"{pred_name if pred_name else '—'}｜"
-                f"p0={p0:.2f} p7={p7:.2f} p10={p10:.2f} leak={leak_score:.2f}｜"
-                f"file={os.path.basename(cycle_file)}"
-            )
+                p0 = prob_map.get(0, 0.0)
+                p7 = prob_map.get(1, 0.0)
+                p10 = prob_map.get(2, 0.0)
+                leak_score = p7 + p10
 
-            cycle_counters[key] += 1
+                start_ts = pd.to_datetime(cycle_df[TIME_COL].iloc[0])
+                end_ts   = pd.to_datetime(cycle_df[TIME_COL].iloc[-1])
+                
+                arbiter.update(sensor_name, end_ts, pred_label, prob_map)
+                
+                result = {
+                    "sensor_id": int(key.split("_")[2]) + 1,
+                    "machine_id": record['si_ip'],
+                    "predicted_class": pred_name,
+                    "maintenance_policy": POLICY_MAP.get(pred_label, "未知"),
+                }
+
+                row = {
+                    "cycle_id": cid,
+                    "sensor_key": key,
+                    "sensor_name": sensor_name,
+                    "start_ts": start_ts,
+                    "end_ts": end_ts,
+                    "n_points": len(cycle_df),
+                    **{c: feats.get(c, None) for c in FEATURE_COLS},
+                    "pred_label": pred_label,
+                    "pred_name": pred_name,
+                    "p_0": p0, "p_7": p7, "p_10": p10,
+                    "leak_score": leak_score,
+                    "file": cycle_file,
+                }
+                
+                pd.DataFrame([row]).to_csv(
+                    features_index_path, mode="a", header=False, index=False, encoding="utf-8-sig"
+                )
+                
+                print(
+                    f"✅ {sensor_name} 週期 #{cid}｜{start_ts}→{end_ts}｜"
+                    f"{pred_name if pred_name else '—'}｜"
+                    f"p0={p0:.2f} p7={p7:.2f} p10={p10:.2f} leak={leak_score:.2f}｜"
+                    f"file={os.path.basename(cycle_file)}"
+                )
+                
+                sql2.insert_data(POLICY_TABLE, result)
+                cycle_counters[key] += 1
+                
+    except KeyboardInterrupt:
+        print("結束程式。")
+    except Exception as e:
+        error_log(f"主程式錯誤：{e}")
+    finally:
+        for det in detectors.values():
+            det.stop()
+        arbiter.stop()
+        sql.close()
+        sql2.close()
 
 if __name__ == "__main__":
     main()
