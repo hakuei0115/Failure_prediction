@@ -14,8 +14,8 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 SENSOR_LIST = [f"sensor{i}" for i in range(1, 7)]
 
 # 要使用的特徵欄位
-# FEATURE_COLS = ["max", "min", "mean", "std", "slope", "stability", "holding_time"]
-FEATURE_COLS = ["mean", "std", "holding_time", "range"]
+# FEATURE_COLS = ["mean", "std", "holding_time", "decay_rate", "diff_half", "integral"]
+FEATURE_COLS = ["mean", "std", "holding_time"]
 
 for sensor in SENSOR_LIST:
     print(f"\n==== 🚀 訓練 {sensor} 的模型 ====")

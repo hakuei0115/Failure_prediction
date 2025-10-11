@@ -37,20 +37,36 @@ def _duration_above_threshold_irregular(ts: pd.Series, x: np.ndarray, thr: float
 def extract_features(df: pd.DataFrame, col: str):
     if df is None or df.empty or col not in df or TIME_COL not in df:
         return None
+
     x = df[col].astype(float).to_numpy()
     ts = pd.to_datetime(df[TIME_COL])
-    if len(x) < 2 or ts.isna().any(): return None
+    if len(x) < 2 or ts.isna().any():
+        return None
+
+    # 保證時間遞增
     if not ts.is_monotonic_increasing:
         df = df.sort_values(TIME_COL).reset_index(drop=True)
         x = df[col].astype(float).to_numpy()
         ts = pd.to_datetime(df[TIME_COL])
 
-    x_max, x_min = float(np.max(x)), float(np.min(x))
-    x_mean, x_std = float(np.mean(x)), float(np.std(x))
-    x_range = float(x_max - x_min)
+    # 計算保壓時間（全段）
     holding_time = _duration_above_threshold_irregular(ts, x, thr=PRESSURE_THRESHOLD)
 
-    return {"mean": x_mean, "std": x_std, "range": x_range, "holding_time": holding_time}
+    # ===== 只取保壓區間特徵 =====
+    mask = x > PRESSURE_THRESHOLD
+    if np.sum(mask) == 0:  # 若完全沒有保壓段
+        return None
+
+    x_hold = x[mask]
+    x_mean = float(np.mean(x_hold))
+    x_std = float(np.std(x_hold))
+
+    return {
+        "mean": x_mean,
+        "std": x_std,
+        "holding_time": holding_time
+    }
+
 
 # ===== 解析檔名（處理兩根洩漏） =====
 def parse_filename_label(filename: str, default_label: str, sensor_idx: int) -> int:

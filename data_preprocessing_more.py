@@ -4,7 +4,7 @@ import numpy as np
 from tqdm import tqdm
 
 # ========== 參數設定 ==========
-DATA_ROOT = "train/一根"  # 根目錄
+DATA_ROOT = "train"  # 根目錄
 SENSOR_LIST = [f"sensor{i}" for i in range(1, 7)]
 LABEL_MAP = {"正常": 0, "7圈": 1, "10圈": 2}
 PRESSURE_COLS = [f"psr_val_{i}" for i in range(6)]
@@ -37,22 +37,78 @@ def _duration_above_threshold_irregular(ts: pd.Series, x: np.ndarray, thr: float
 def extract_features(df: pd.DataFrame, col: str):
     if df is None or df.empty or col not in df or TIME_COL not in df:
         return None
+
     x = df[col].astype(float).to_numpy()
     ts = pd.to_datetime(df[TIME_COL])
-    if len(x) < 2 or ts.isna().any(): return None
+    if len(x) < 2 or ts.isna().any():
+        return None
+
+    # 確保時間排序
     if not ts.is_monotonic_increasing:
         df = df.sort_values(TIME_COL).reset_index(drop=True)
         x = df[col].astype(float).to_numpy()
         ts = pd.to_datetime(df[TIME_COL])
 
-    x_max, x_min = float(np.max(x)), float(np.min(x))
-    x_mean, x_std = float(np.mean(x)), float(np.std(x))
-    x_range = float(x_max - x_min)
-    total_sec = max((ts.iloc[-1] - ts.iloc[0]).total_seconds(), 1e-9)
-    
-    holding_time = _duration_above_threshold_irregular(ts, x, thr=PRESSURE_THRESHOLD)
-    return {"mean": x_mean, "std": x_std, "range": x_range, "holding_time": holding_time}
+    # 時間轉秒
+    t = ts.astype("int64").to_numpy() / 1e9
 
+    # ===== 保壓判斷 =====
+    holding_time = _duration_above_threshold_irregular(ts, x, thr=PRESSURE_THRESHOLD)
+    mask = x > PRESSURE_THRESHOLD
+    if np.sum(mask) == 0:
+        return None
+
+    x_hold = x[mask]
+    t_hold = t[mask]
+
+    # ===== 基本特徵 =====
+    mean = float(np.mean(x_hold))
+    std = float(np.std(x_hold))
+
+    # ===== 洩漏差異關鍵特徵 =====
+    # 1. 壓力衰減率（負值表示下降）
+    if holding_time > 0:
+        decay_rate = float((x_hold[-1] - x_hold[0]) / holding_time)
+    else:
+        decay_rate = 0.0
+
+    # 2. 前半後半平均壓力差
+    mid = len(x_hold) // 2
+    diff_half = float(np.mean(x_hold[:mid]) - np.mean(x_hold[mid:]))
+
+    # 3. 壓力曲線面積（近似能量）
+    integral = float(np.trapezoid(x_hold, t_hold))
+
+    return {
+        "mean": mean,
+        "std": std,
+        "decay_rate": decay_rate,
+        "diff_half": diff_half,
+        "integral": integral,
+        "holding_time": holding_time
+    }
+
+# ===== 解析檔名（處理兩根洩漏） =====
+def parse_filename_label(filename: str, default_label: str, sensor_idx: int) -> int:
+    """
+    filename: 檔名，如 cycle_001_12_7.csv
+    default_label: 資料夾名稱的標籤 (正常/7圈/10圈)
+    sensor_idx: 目前處理的感測器索引 (0~5)
+    回傳該感測器的類別 (0=正常,1=7圈,2=10圈)
+    """
+    base = os.path.splitext(filename)[0]
+    parts = base.split("_")
+    if len(parts) >= 4:
+        leak_sensors = parts[2]  # "12" → 第1、2根
+        leak_label = parts[3]    # "7"
+        if str(sensor_idx+1) in leak_sensors:
+            return LABEL_MAP.get(f"{leak_label}圈", LABEL_MAP[default_label])
+        else:
+            return LABEL_MAP["正常"]
+    else:
+        return LABEL_MAP[default_label]
+
+# ===== 單一感測器處理 =====
 def process_sensor(sensor: str, data_root: str):
     records = []
     for label_folder in LABEL_MAP.keys():
@@ -75,16 +131,17 @@ def process_sensor(sensor: str, data_root: str):
             features = extract_features(df, pressure_col)
             if features is None:
                 continue
-            features["label"] = LABEL_MAP[label_folder]
+
+            # 判斷標籤：一根 → 用資料夾名稱；兩根 → 用檔名解析
+            features["label"] = parse_filename_label(file, label_folder, sensor_idx)
             features["file"] = file
-            # features["source"] = os.path.basename(data_root)  # 記錄來自一根/兩根
             records.append(features)
 
     return pd.DataFrame(records)
 
-
+# ===== 主程式 =====
 def main():
-    data_roots = [os.path.join("train", d) for d in os.listdir("train") if os.path.isdir(os.path.join("train", d))]
+    data_roots = [os.path.join(DATA_ROOT, d) for d in os.listdir(DATA_ROOT) if os.path.isdir(os.path.join(DATA_ROOT, d))]
     print(f"發現資料來源：{data_roots}")
 
     for sensor in SENSOR_LIST:
@@ -99,7 +156,6 @@ def main():
             out_path = os.path.join(OUTPUT_DIR, f"{sensor}_train.csv")
             merged.to_csv(out_path, index=False, encoding="utf-8-sig")
             print(f"[✓] 輸出：{out_path} ({len(merged)} 筆樣本)")
-
 
 if __name__ == "__main__":
     main()
