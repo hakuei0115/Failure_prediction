@@ -104,10 +104,12 @@ def extract_features(df: pd.DataFrame, col: str):
         return None
 
     x_hold = x[mask]
+    x_max, x_min = float(np.max(x)), float(np.min(x))
     x_mean = float(np.mean(x_hold))
     x_std = float(np.std(x_hold))
+    x_range = float(x_max - x_min)
 
-    return { "mean": x_mean, "std": x_std, "holding_time": holding_time }
+    return { "mean": x_mean, "std": x_std, "range": x_range, "holding_time": holding_time }
 
 # ===== 推論輔助 =====
 def _safe_vector_from_features(feats: dict, feature_cols: list[str], model=None):

@@ -58,15 +58,12 @@ def extract_features(df: pd.DataFrame, col: str):
         return None
 
     x_hold = x[mask]
+    x_max, x_min = float(np.max(x)), float(np.min(x))
     x_mean = float(np.mean(x_hold))
     x_std = float(np.std(x_hold))
+    x_range = float(x_max - x_min)
 
-    return {
-        "mean": x_mean,
-        "std": x_std,
-        "holding_time": holding_time
-    }
-
+    return { "mean": x_mean, "std": x_std, "range": x_range, "holding_time": holding_time }
 
 # ===== 解析檔名（處理兩根洩漏） =====
 def parse_filename_label(filename: str, default_label: str, sensor_idx: int) -> int:

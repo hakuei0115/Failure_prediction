@@ -15,7 +15,7 @@ SENSOR_LIST = [f"sensor{i}" for i in range(1, 7)]
 
 # 要使用的特徵欄位
 # FEATURE_COLS = ["mean", "std", "holding_time", "decay_rate", "diff_half", "integral"]
-FEATURE_COLS = ["mean", "std", "holding_time"]
+FEATURE_COLS = ["mean", "std", "range", "holding_time"]
 
 for sensor in SENSOR_LIST:
     print(f"\n==== 🚀 訓練 {sensor} 的模型 ====")
