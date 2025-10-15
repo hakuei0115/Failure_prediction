@@ -41,11 +41,14 @@ def decode_valve_state(do_brk):
     for i, ch in enumerate(channels):
         pair = bits[i * 2:(i + 1) * 2]
         if pair == "11":
-            state = "ON"
+            state = "ONLINE"
         elif pair == "00":
-            state = "OFF"
+            state = "OFFLINE"
         else:
             state = "異常"
+        
+        if ch == 19 or ch == 20 or ch == 21 or ch == 22 or ch == 23 or ch == 24:
+            continue
         state_dict[f"ch_{ch}"] = state
 
     return json.dumps(state_dict, ensure_ascii=False)
