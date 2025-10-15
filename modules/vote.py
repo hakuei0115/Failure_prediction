@@ -47,7 +47,7 @@ class MultiLeakArbiter:
             # 若有 prob_map，取最大機率類別
             if prob_map and isinstance(prob_map, dict):
                 label = max(prob_map, key=prob_map.get)
-            if label in [1, 2]:
+            if label != 0:
                 self.buffers[sensor_name].append(label)
 
     # ===== 週期性結算 =====
