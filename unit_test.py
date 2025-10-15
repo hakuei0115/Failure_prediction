@@ -183,92 +183,102 @@ def handle_batch_result(results):
 
 # ===== 主流程 =====
 def main():
-    global CYCLE_ERROR
-    # sql = MySQLConnector(MYSQL_HOST, MYSQL_USER, MYSQL_PASSWORD, DATA_DB)
-    # sql2 = MySQLConnector(MYSQL_HOST, MYSQL_USER, MYSQL_PASSWORD, POLICY_DB)
-    
-    detectors = {
-        key: CycleDetector(low_th=LOW_END, high_th=HIGH_ON, sensor_key=key, mode=MODE_MAP[key], fixed_duration_sec=11.0)
-        for key in MODE_MAP.keys()
-    }
-    
-    arbiter = MultiLeakArbiter(
-        sensors=list(SENSOR_NAME.values()),
-        batch_sec=5,  # 5 分鐘統計一次
-        on_batch_result=handle_batch_result
-    )
-    arbiter.start()
-    
-    cycle_counters = {key: 1 for key in MODE_MAP.keys()}
-    models = load_models()
+    try:
+        global CYCLE_ERROR
+        # sql = MySQLConnector(MYSQL_HOST, MYSQL_USER, MYSQL_PASSWORD, DATA_DB)
+        # sql2 = MySQLConnector(MYSQL_HOST, MYSQL_USER, MYSQL_PASSWORD, POLICY_DB)
+        
+        detectors = {
+            key: CycleDetector(low_th=LOW_END, high_th=HIGH_ON, sensor_key=key, mode=MODE_MAP[key], fixed_duration_sec=11.0)
+            for key in MODE_MAP.keys()
+        }
+        
+        arbiter = MultiLeakArbiter(
+            sensors=list(SENSOR_NAME.values()),
+            batch_sec=5,  # 5 分鐘統計一次
+            on_batch_result=handle_batch_result
+        )
+        arbiter.start()
+        
+        cycle_counters = {key: 1 for key in MODE_MAP.keys()}
+        models = load_models()
 
-    features_index_path = os.path.join(OUTPUT_DIR, "features_index.csv")
-    ensure_features_index_header(features_index_path)
+        features_index_path = os.path.join(OUTPUT_DIR, "features_index.csv")
+        ensure_features_index_header(features_index_path)
 
-    for record in simulate_data_stream():
-        for key, det in detectors.items():
-            cycle_df = det.update(record)
-            if cycle_df is None or cycle_df.empty:
-                continue
+        for record in simulate_data_stream():
+            for key, det in detectors.items():
+                cycle_df = det.update(record)
+                if cycle_df is None or cycle_df.empty:
+                    continue
 
-            sensor_name = SENSOR_NAME[key]
-            if det.last_cycle_valid is False:
-                CYCLE_ERROR += 1
-                if CYCLE_ERROR >= 3:
-                    # send_sms(USERNAME, PASSWORD, API, MOBILE, f"⚠️ {sensor_name} 連續三次異常，請檢查系統！")
-                    print(f"⚠️ {sensor_name} 異常窗，略過（{det.last_cycle_reason}）") # 加入counter
-                continue
-            
-            cid = cycle_counters[key]
-            cycle_file = os.path.join(OUTPUT_DIR, f"{sensor_name}_cycle_{cid:03d}.csv")
-            cycle_df.to_csv(cycle_file, index=False, encoding="utf-8-sig")
+                sensor_name = SENSOR_NAME[key]
+                if det.last_cycle_valid is False:
+                    CYCLE_ERROR += 1
+                    if CYCLE_ERROR >= 3:
+                        # send_sms(USERNAME, PASSWORD, API, MOBILE, f"⚠️ {sensor_name} 連續三次異常，請檢查系統！")
+                        print(f"⚠️ {sensor_name} 異常窗，略過（{det.last_cycle_reason}）") # 加入counter
+                    continue
+                
+                cid = cycle_counters[key]
+                cycle_file = os.path.join(OUTPUT_DIR, f"{sensor_name}_cycle_{cid:03d}.csv")
+                cycle_df.to_csv(cycle_file, index=False, encoding="utf-8-sig")
 
-            feats = extract_features(cycle_df, key) or {}
-            model = models.get(sensor_name)
-            X_row = _safe_vector_from_features(feats, FEATURE_COLS, model=model)
+                feats = extract_features(cycle_df, key) or {}
+                model = models.get(sensor_name)
+                X_row = _safe_vector_from_features(feats, FEATURE_COLS, model=model)
 
-            pred_label, pred_name, prob_map = None, None, {}
-            if model is not None and X_row is not None:
-                pred_label, pred_name, prob_map = predict_with_model(model, X_row)
-            
+                pred_label, pred_name, prob_map = None, None, {}
+                if model is not None and X_row is not None:
+                    pred_label, pred_name, prob_map = predict_with_model(model, X_row)
+                
 
-            p0 = prob_map.get(0, 0.0)
-            p7 = prob_map.get(1, 0.0)
-            p10 = prob_map.get(2, 0.0)
-            leak_score = p7 + p10
+                p0 = prob_map.get(0, 0.0)
+                p5 = prob_map.get(1, 0.0)
+                p7 = prob_map.get(2, 0.0)
+                p10 = prob_map.get(3, 0.0)
+                leak_score = p5 + p7 + p10
 
-            start_ts = pd.to_datetime(cycle_df[TIME_COL].iloc[0])
-            end_ts   = pd.to_datetime(cycle_df[TIME_COL].iloc[-1])
-            
-            arbiter.update(sensor_name, end_ts, pred_label, prob_map)
+                start_ts = pd.to_datetime(cycle_df[TIME_COL].iloc[0])
+                end_ts   = pd.to_datetime(cycle_df[TIME_COL].iloc[-1])
+                
+                arbiter.update(sensor_name, end_ts, pred_label, prob_map)
 
-            row = {
-                "cycle_id": cid,
-                "sensor_key": key,
-                "sensor_name": sensor_name,
-                "start_ts": start_ts,
-                "end_ts": end_ts,
-                "n_points": len(cycle_df),
-                **{c: feats.get(c, None) for c in FEATURE_COLS},
-                "pred_label": pred_label,
-                "pred_name": pred_name,
-                "p_0": p0, "p_7": p7, "p_10": p10,
-                "leak_score": leak_score,
-                "file": cycle_file,
-            }
-            
-            pd.DataFrame([row]).to_csv(
-                features_index_path, mode="a", header=False, index=False, encoding="utf-8-sig"
-            )
-            
-            print(
-                f"✅ {sensor_name} 週期 #{cid}｜{start_ts}→{end_ts}｜"
-                f"{pred_name if pred_name else '—'}｜"
-                f"p0={p0:.2f} p7={p7:.2f} p10={p10:.2f} leak={leak_score:.2f}｜"
-                f"file={os.path.basename(cycle_file)}"
-            )
+                row = {
+                    "cycle_id": cid,
+                    "sensor_key": key,
+                    "sensor_name": sensor_name,
+                    "start_ts": start_ts,
+                    "end_ts": end_ts,
+                    "n_points": len(cycle_df),
+                    **{c: feats.get(c, None) for c in FEATURE_COLS},
+                    "pred_label": pred_label,
+                    "pred_name": pred_name,
+                    "p_0": p0, "p_5": p5, "p_7": p7, "p_10": p10,
+                    "leak_score": leak_score,
+                    "file": cycle_file,
+                }
+                
+                pd.DataFrame([row]).to_csv(
+                    features_index_path, mode="a", header=False, index=False, encoding="utf-8-sig"
+                )
+                
+                print(
+                    f"✅ {sensor_name} 週期 #{cid}｜{start_ts}→{end_ts}｜"
+                    f"{pred_name if pred_name else '—'}｜"
+                    f"p0={p0:.2f} p5={p5:.2f} p7={p7:.2f} p10={p10:.2f} leak={leak_score:.2f}｜"
+                    f"file={os.path.basename(cycle_file)}"
+                )
 
-            cycle_counters[key] += 1
-
+                cycle_counters[key] += 1
+    except KeyboardInterrupt:
+        print("手動中止程式。")
+    except Exception as e:
+        # error_log(f"主程式錯誤：{e}")
+        print(f"❌ 主程式錯誤：{e}")
+    finally:
+        arbiter.stop()
+        print("程式結束。")
+        
 if __name__ == "__main__":
     main()
