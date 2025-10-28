@@ -1,4 +1,5 @@
 import os
+import time
 import numpy as np
 import pandas as pd
 import joblib
@@ -23,8 +24,7 @@ TABLE_NAME = os.getenv("TABLE_NAME")
 LIFE_LIMIT_TABLE = os.getenv("LIFE_LIMIT_TABLE")
 
 OUTPUT_DIR = "cycles_out"
-MODELS_DIR = "models_no5"
-# MODELS_DIR = "models_many_normal_no5"
+MODELS_DIR = "models"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 CYCLE_ERROR = 0
 
@@ -90,10 +90,12 @@ def extract_features(df: pd.DataFrame, col: str):
         return None
 
     x_hold = x[mask]
+    x_max, x_min = float(np.max(x)), float(np.min(x))
     x_mean = float(np.mean(x_hold))
     x_std = float(np.std(x_hold))
+    x_range = float(x_max - x_min)
 
-    return { "mean": x_mean, "std": x_std, "holding_time": holding_time }
+    return { "mean": x_mean, "std": x_std, "range": x_range, "holding_time": holding_time }
 
 # ===== 推論輔助 =====
 def _safe_vector_from_features(feats: dict, feature_cols: list[str], model=None):
@@ -190,11 +192,21 @@ def main():
         on_batch_result=handle_batch_result
     )
     arbiter.start()
+    
+    last_ts = None
 
     try:
         while True:
             record = sql.get_latest_row(TABLE_NAME)
             record['si_ts'] = _to_datetime(record['si_ts'])
+            
+            ts = record['si_ts']
+            
+            if ts == last_ts:
+                time.sleep(0.01)
+                continue
+            
+            last_ts = ts
 
             for key, det in detectors.items():
                 cycle_df = det.update(record)
