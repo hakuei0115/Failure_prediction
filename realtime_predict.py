@@ -1,5 +1,6 @@
 import os
 import time
+from datetime import datetime
 import numpy as np
 import pandas as pd
 import joblib
@@ -255,8 +256,8 @@ def main():
                     "cycle_id": cid,
                     "sensor_key": key,
                     "sensor_name": sensor_name,
-                    "start_ts": start_ts,
-                    "end_ts": end_ts,
+                    "start_ts": start_ts.strftime('%Y-%m-%d %H:%M:%S'),
+                    "end_ts": end_ts.strftime('%Y-%m-%d %H:%M:%S'),
                     "n_points": len(cycle_df),
                     **{c: feats.get(c, None) for c in FEATURE_COLS},
                     "pred_label": pred_label,
